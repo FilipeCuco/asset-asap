@@ -1,74 +1,70 @@
 import bpy
 
 
-class AS_SearchResult(bpy.types.PropertyGroup):
-    """Single item in the search results list."""
+class AS_DlcItem(bpy.types.PropertyGroup):
+    """Single DLC entry in the DLC browser list."""
     name: bpy.props.StringProperty()
-
-
-def _on_search_query_update(self, context):
-    """Clear the query cache whenever the search field changes."""
-    self.last_query_text = ""
+    ydr_count: bpy.props.IntProperty(default=0)
+    yft_count: bpy.props.IntProperty(default=0)
+    total: bpy.props.IntProperty(default=0)
 
 
 class AS_Properties(bpy.types.PropertyGroup):
-    search_query: bpy.props.StringProperty(
-        name="Asset Name",
-        description="Name of the GTA V asset to search for",
-        default="",
-        update=_on_search_query_update,
+    # ── DLC Browser ──────────────────────────────────
+    dlc_list: bpy.props.CollectionProperty(type=AS_DlcItem)
+    active_dlc_index: bpy.props.IntProperty(default=0)
+    dlc_import_progress: bpy.props.StringProperty(default="")
+    is_importing_dlc: bpy.props.BoolProperty(default=False)
+    import_filter: bpy.props.EnumProperty(
+        name="File Types",
+        description="Choose which model types to import",
+        items=[
+            ("BOTH", "YDR + YFT", "Import both .ydr and .yft files"),
+            ("YDR", "YDR Only", "Import only .ydr files (drawables)"),
+            ("YFT", "YFT Only", "Import only .yft files (fragments)"),
+        ],
+        default="BOTH",
     )
-    search_results: bpy.props.CollectionProperty(type=AS_SearchResult)
-    active_result_index: bpy.props.IntProperty(default=0)
-    drawable_only: bpy.props.BoolProperty(
-        name="Drawable Only",
-        description=(
-            "Import only the visual drawable — collisions and fragment wrapper are deleted. "
-            "The drawable is renamed to match the fragment/file name"
-        ),
-        default=False,
+    asset_category: bpy.props.EnumProperty(
+        name="Category",
+        description="Filter assets by category based on RPF folder structure",
+        items=[
+            ("ALL", "All", "Import all assets"),
+            ("VEHICLES", "Vehicles", "Import only vehicle models (merges meshes)"),
+            ("PEDS", "Peds", "Import only ped models (merges meshes)"),
+            ("PROPS", "Props", "Import only non-vehicle/non-ped assets"),
+        ],
+        default="ALL",
     )
-    send_to_asset_browser: bpy.props.BoolProperty(
-        name="Add to Asset Browser",
-        description=(
-            "Mark the imported drawable as a Blender asset and save the file automatically. "
-            "Only available when Drawable Only is enabled"
-        ),
-        default=False,
-    )
+
+    # ── Options ──────────────────────────────────────
     clean_temp: bpy.props.BoolProperty(
         name="Clean Temp After Import",
         description="Delete temporary XML files after import completes",
         default=True,
     )
-    texture_export_dir: bpy.props.StringProperty(
-        name="Export Folder",
-        description="Folder where textures will be saved as .dds",
-        subtype="DIR_PATH",
-        default="",
-    )
+
+
+    # ── Internal state ───────────────────────────────
     cache_info: bpy.props.StringProperty(default="")
     status_message: bpy.props.StringProperty(default="Ready")
-    is_searching: bpy.props.BoolProperty(default=False)
     is_importing: bpy.props.BoolProperty(default=False)
     is_building_cache: bpy.props.BoolProperty(default=False)
     server_running: bpy.props.BoolProperty(default=False)
-    last_query_text: bpy.props.StringProperty(default="")
-    total_results: bpy.props.IntProperty(default=0)
 
 
-classes = [AS_SearchResult, AS_Properties]
+classes = [AS_DlcItem, AS_Properties]
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.as_props = bpy.props.PointerProperty(type=AS_Properties)
-    bpy.types.Scene.as_active_index = bpy.props.IntProperty()
+    bpy.types.Scene.as_active_dlc_index = bpy.props.IntProperty()
 
 
 def unregister():
     del bpy.types.Scene.as_props
-    del bpy.types.Scene.as_active_index
+    del bpy.types.Scene.as_active_dlc_index
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

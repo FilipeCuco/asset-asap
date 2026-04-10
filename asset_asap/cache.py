@@ -122,6 +122,74 @@ def find_ytd(cache_data, asset_path):
     return same_dir[0] if same_dir else candidates[0]
 
 
+def list_dlcs(cache_data, extensions=None):
+    """
+    Parse cached file paths and group them by DLC name.
+
+    DLC paths typically contain 'dlcpacks/<name>/'.
+    Files outside dlcpacks are grouped under 'Base Game'.
+
+    Returns a sorted list of dicts:
+        [{"name": "patchday24ng", "ydr_count": 42, "yft_count": 5, "total": 47}, ...]
+    """
+    import re
+    dlc_pattern = re.compile(r"dlcpacks[/\\]([^/\\]+)[/\\]", re.IGNORECASE)
+    groups = {}
+
+    files = cache_data.get("files", [])
+    if extensions:
+        ext_tuple = tuple(extensions)
+        files = [f for f in files if f.lower().endswith(ext_tuple)]
+
+    for f in files:
+        m = dlc_pattern.search(f)
+        dlc_name = m.group(1) if m else "Base Game"
+        if dlc_name not in groups:
+            groups[dlc_name] = {"ydr": 0, "yft": 0}
+        fl = f.lower()
+        if fl.endswith(".ydr"):
+            groups[dlc_name]["ydr"] += 1
+        elif fl.endswith(".yft"):
+            groups[dlc_name]["yft"] += 1
+
+    result = []
+    for name, counts in sorted(groups.items(), key=lambda x: x[0].lower()):
+        result.append({
+            "name": name,
+            "ydr_count": counts["ydr"],
+            "yft_count": counts["yft"],
+            "total": counts["ydr"] + counts["yft"],
+        })
+    return result
+
+
+def get_dlc_files(cache_data, dlc_name, extensions=None):
+    """
+    Return all cached file paths belonging to the specified DLC.
+
+    dlc_name: the DLC folder name (e.g. 'patchday24ng') or 'Base Game'.
+    extensions: optional tuple of extensions to filter by.
+    """
+    import re
+    files = cache_data.get("files", [])
+
+    if dlc_name == "Base Game":
+        dlc_pattern = re.compile(r"dlcpacks[/\\]", re.IGNORECASE)
+        matched = [f for f in files if not dlc_pattern.search(f)]
+    else:
+        pattern = re.compile(
+            r"dlcpacks[/\\]" + re.escape(dlc_name) + r"[/\\]",
+            re.IGNORECASE,
+        )
+        matched = [f for f in files if pattern.search(f)]
+
+    if extensions:
+        ext_tuple = tuple(extensions)
+        matched = [f for f in matched if f.lower().endswith(ext_tuple)]
+
+    return matched
+
+
 def build(port, progress_cb=None):
     """
     Build the local cache by querying the API for all asset extensions in parallel.

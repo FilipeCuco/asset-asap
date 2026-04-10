@@ -1,12 +1,12 @@
 bl_info = {
     "name": "Asset ASAP — GTA V via CodeWalker.API",
     "author": "Lando",
-    "version": (1, 0, 0),
+    "version": (2, 0, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Asset ASAP",
     "description": (
-        "Import GTA V assets directly from RPF archives via CodeWalker.API. "
-        "Integrates with the forge.plebmasters.de browser extension."
+        "Import GTA V DLC assets in bulk from RPF archives via CodeWalker.API. "
+        "Browse DLCs and import all models directly to the Asset Browser."
     ),
     "category": "Import-Export",
 }
@@ -15,38 +15,35 @@ from . import props, preferences, ops, ui, server, cache, textures
 
 
 def _on_load_post(*_):
-    """Restore persistent state (asset cache info + last search) after Blender loads a file."""
+    """Restore persistent state (asset cache info + DLC list) after Blender loads a file."""
     import bpy
 
-    props = None
+    scene_props = None
     try:
-        props = bpy.context.scene.as_props
+        scene_props = bpy.context.scene.as_props
     except Exception:
         return
 
     # Restore asset cache info label
     info = cache.cache_info_str(cache.get_cache_path())
     if info:
-        props.cache_info = info
+        scene_props.cache_info = info
 
-    # Restore last search results from disk
-    sc = cache.load_search_cache()
-    if sc and sc.get("query") and sc.get("results"):
+    # Auto-load DLC list if cache exists
+    cache_data = cache.load(cache.get_cache_path())
+    if cache_data:
         try:
-            props.last_query_text = sc["query"]
-            props.total_results = sc.get("total", len(sc["results"]))
-            props.search_results.clear()
-            for path in sc["results"]:
-                item = props.search_results.add()
-                item.name = path
-            count = len(sc["results"])
-            total = props.total_results
-            if total > count:
-                props.status_message = f"Showing {count} of {total} results — refine your search"
-            else:
-                props.status_message = f"Found {count} result(s) (restored)"
+            dlcs = cache.list_dlcs(cache_data, extensions=(".ydr", ".yft"))
+            scene_props.dlc_list.clear()
+            for d in dlcs:
+                item = scene_props.dlc_list.add()
+                item.name = d["name"]
+                item.ydr_count = d["ydr_count"]
+                item.yft_count = d["yft_count"]
+                item.total = d["total"]
+            scene_props.status_message = f"Loaded {len(dlcs)} DLC(s)"
         except Exception as e:
-            print(f"[AssetASAP] Failed to restore search cache: {e}")
+            print(f"[AssetASAP] Failed to restore DLC list: {e}")
 
 
 def register():

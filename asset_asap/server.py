@@ -1,6 +1,6 @@
 """
 Local HTTP server embedded in the addon.
-Listens for POST /import-asset from the browser extension.
+Listens for POST /import-dlc from external tools.
 Runs in a daemon thread so it never blocks Blender.
 """
 
@@ -36,7 +36,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         print(f"[AssetASAP] Incoming POST request to {self.path}")
-        if self.path != "/import-asset":
+        if self.path != "/import-dlc":
             self._send(404, {"error": "Not found"})
             return
 
@@ -50,27 +50,39 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "Invalid JSON"})
             return
 
-        asset_name = body.get("asset_name", "").strip()
-        if not asset_name:
-            self._send(400, {"error": "asset_name is required"})
+        dlc_name = body.get("dlc_name", "").strip()
+        if not dlc_name:
+            self._send(400, {"error": "dlc_name is required"})
             return
 
-        print(f"[AssetASAP] Triggering import for: {asset_name}")
+        print(f"[AssetASAP] Triggering DLC import for: {dlc_name}")
 
         def _trigger():
             try:
-                # Provide visual feedback in Blender's status bar
-                if hasattr(bpy.context, "workspace"):
-                    bpy.context.workspace.status_text_set(f"Asset ASAP: Importing {asset_name}...")
-                print(f"[AssetASAP] Calling operator for {asset_name}")
-                getattr(bpy.ops, "as").import_by_name(asset_name=asset_name)
+                # Find the DLC index in the list
+                props = bpy.context.scene.as_props
+
+                # Ensure DLCs are loaded
+                if not props.dlc_list:
+                    bpy.ops.as_ops.load_dlcs()
+
+                # Find matching DLC
+                idx = -1
+                for i, item in enumerate(props.dlc_list):
+                    if item.name.lower() == dlc_name.lower():
+                        idx = i
+                        break
+
+                if idx >= 0:
+                    bpy.ops.as_ops.import_dlc(index=idx)
+                else:
+                    print(f"[AssetASAP] DLC '{dlc_name}' not found in list")
             except Exception as e:
-                print(f"[AssetASAP] Operator execution error: {e}")
+                print(f"[AssetASAP] DLC import error: {e}")
             return None
 
-        # Use a small delay to ensure the server response is sent first
         bpy.app.timers.register(_trigger, first_interval=0.1)
-        self._send(200, {"status": "ok", "asset_name": asset_name})
+        self._send(200, {"status": "ok", "dlc_name": dlc_name})
 
     def do_GET(self):
         if self.path == "/ping":

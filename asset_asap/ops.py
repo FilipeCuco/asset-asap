@@ -7,7 +7,7 @@ from bpy.types import Operator
 from . import api, cache
 from .preferences import get_prefs
 from .cache import MODEL_EXTENSIONS
-from .textures import get_object_images, copy_textures_from_temp
+
 
 
 # ---------------------------------------------------------------------------
@@ -92,11 +92,57 @@ def _find_ytd_path(asset_path, port, use_cache):
     return same_dir[0] if same_dir else result[0]
 
 
+def _is_vehicle_path(asset_path):
+    """Return True if the asset path contains a 'vehicles' folder."""
+    pl = asset_path.lower().replace("\\", "/")
+    return "/vehicles/" in pl or pl.endswith("/vehicles")
+
+
+def _is_ped_path(asset_path):
+    """Return True if the asset path contains a 'peds' folder."""
+    pl = asset_path.lower().replace("\\", "/")
+    return "/peds/" in pl or pl.endswith("/peds")
+
+
 def _collect_subtree(obj, result):
     """Recursively add all descendants of obj into result."""
     for child in obj.children:
         result.add(child)
         _collect_subtree(child, result)
+
+
+def _merge_meshes(objects, final_name):
+    """
+    Join all MESH objects in the list into a single object.
+    Returns the merged object or None.
+    """
+    meshes = [o for o in objects if o is not None and o.type == "MESH"]
+    if not meshes:
+        return None
+    if len(meshes) == 1:
+        meshes[0].name = final_name
+        if meshes[0].data:
+            meshes[0].data.name = final_name
+        return meshes[0]
+
+    # Deselect everything first
+    bpy.ops.object.select_all(action="DESELECT")
+
+    # Select all mesh parts and set the first as active
+    for m in meshes:
+        m.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+
+    # Join into one
+    bpy.ops.object.join()
+
+    merged = bpy.context.active_object
+    if merged:
+        merged.name = final_name
+        if merged.data:
+            merged.data.name = final_name
+        print(f"[AssetASAP]   merged {len(meshes)} meshes into '{final_name}'")
+    return merged
 
 
 def _apply_drawable_only(new_objects, asset_path):
@@ -211,26 +257,26 @@ def _mark_as_asset(obj):
 
     if bpy.data.filepath:
         _ensure_catalog(bpy.data.filepath)
-        bpy.ops.wm.save_mainfile()
+        # Don't save on every single asset during batch — caller handles it
         return True, None
     else:
         return False, "Save the .blend file to persist the asset in the browser"
 
 
-def _do_import(asset_path, ytd_path, temp_dir, props, drawable_only, asset_browser, clean):
+def _do_import_single(asset_path, ytd_path, temp_dir, clean, is_vehicle=False):
     """
-    Import asset_path via Sollumz, then apply post-processing based on flags.
-    Runs on the main thread (called from bpy.app.timers).
+    Import a single asset_path via Sollumz with drawable_only + asset_browser.
+    If is_vehicle=True, merges all drawable meshes into a single object.
+    Returns (success: bool, asset_name: str, warning: str | None).
+    Must run on main thread.
     """
-    print(f"[AssetASAP] _do_import: drawable_only={drawable_only} asset_browser={asset_browser} path={asset_path}")
+    print(f"[AssetASAP] _do_import_single: path={asset_path} vehicle={is_vehicle}")
     basename = os.path.basename(asset_path)
     xml_name = basename + ".xml"
     xml_path = os.path.join(temp_dir, xml_name)
 
     if not os.path.exists(xml_path):
-        props.status_message = f"Error: {xml_name} not found in temp dir"
-        props.is_importing = False
-        return None
+        return False, basename, f"{xml_name} not found in temp dir"
 
     existing = set(bpy.context.scene.objects)
 
@@ -240,27 +286,37 @@ def _do_import(asset_path, ytd_path, temp_dir, props, drawable_only, asset_brows
             files=[{"name": xml_name}],
         )
     except Exception as e:
-        props.status_message = f"Sollumz error: {e}"
-        props.is_importing = False
-        return None
+        return False, basename, f"Sollumz error: {e}"
 
     if result != {"FINISHED"}:
-        props.status_message = "Import failed (Sollumz returned non-FINISHED)"
-        props.is_importing = False
-        return None
+        return False, basename, "Import failed (Sollumz returned non-FINISHED)"
 
     new_objs = [o for o in bpy.context.scene.objects if o not in existing]
 
-    final_obj = None
-    if drawable_only:
-        final_obj = _apply_drawable_only(new_objs, asset_path)
+    # Apply drawable_only — strips collisions and containers
+    final_obj = _apply_drawable_only(new_objs, asset_path)
 
-    if asset_browser and final_obj:
+    # For vehicles: merge all remaining meshes into one object
+    if is_vehicle and final_obj:
+        asset_name_base = os.path.splitext(basename)[0]
+        # Gather all mesh objects that were part of this import
+        remaining = [o for o in bpy.context.scene.objects
+                     if o not in existing and o.type == "MESH"]
+        if not remaining and final_obj.type == "MESH":
+            remaining = [final_obj]
+        if len(remaining) > 1:
+            final_obj = _merge_meshes(remaining, asset_name_base)
+        elif remaining:
+            final_obj = remaining[0]
+            final_obj.name = asset_name_base
+            if final_obj.data:
+                final_obj.data.name = asset_name_base
+
+    # Mark as asset for Asset Browser
+    if final_obj:
         ok, warn = _mark_as_asset(final_obj)
-        if warn:
-            props.status_message = f"Imported: {final_obj.name}  ({warn})"
-            props.is_importing = False
-            return None
+        if not ok and warn:
+            print(f"[AssetASAP]   Asset warning: {warn}")
 
     if clean:
         ytd_basename = os.path.basename(ytd_path) if ytd_path else None
@@ -268,9 +324,7 @@ def _do_import(asset_path, ytd_path, temp_dir, props, drawable_only, asset_brows
         print(f"[AssetASAP] Clean temp: {removed} file(s) removed")
 
     asset_name = final_obj.name if final_obj else basename
-    props.status_message = f"Imported: {asset_name}"
-    props.is_importing = False
-    return None
+    return True, asset_name, None
 
 
 # ---------------------------------------------------------------------------
@@ -344,86 +398,41 @@ class AS_OT_build_cache(Operator):
         return {"FINISHED"}
 
 
-class AS_OT_search(Operator):
-    bl_idname = "as.search"
-    bl_label = "Search"
+class AS_OT_load_dlcs(Operator):
+    bl_idname = "as.load_dlcs"
+    bl_label = "Load DLCs"
+    bl_description = "Read the asset cache and list all available DLCs"
 
     def execute(self, context):
         props = context.scene.as_props
-        prefs = get_prefs(context)
-        query = props.search_query.strip()
+        cache_data = cache.load(cache.get_cache_path())
 
-        if not query:
-            self.report({"WARNING"}, "Enter an asset name first")
+        if not cache_data:
+            self.report({"ERROR"}, "No cache found — build the cache first")
+            props.status_message = "No cache — build it first"
             return {"CANCELLED"}
 
-        # Return cached results when the same query is repeated
-        if query == props.last_query_text and props.search_results:
-            count = len(props.search_results)
-            total = props.total_results
-            if total > count:
-                props.status_message = f"Showing {count} of {total} results — refine your search"
-            else:
-                props.status_message = f"Found {count} result(s)"
-            return {"FINISHED"}
+        dlcs = cache.list_dlcs(cache_data, extensions=(".ydr", ".yft"))
 
-        props.search_results.clear()
-        props.status_message = f"Searching '{query}'…"
-        props.is_searching = True
+        props.dlc_list.clear()
+        for d in dlcs:
+            item = props.dlc_list.add()
+            item.name = d["name"]
+            item.ydr_count = d["ydr_count"]
+            item.yft_count = d["yft_count"]
+            item.total = d["total"]
 
-        port = prefs.cw_api_port
-        use_cache = prefs.use_cache
-
-        def _thread():
-            total = 0
-            if use_cache:
-                cache_data = cache.load(cache.get_cache_path())
-                if cache_data:
-                    result, total = cache.search_local(cache_data, query, extensions=MODEL_EXTENSIONS)
-                    ok = True
-                else:
-                    ok, result = api.search_file(port, query, extensions=MODEL_EXTENSIONS)
-                    if ok and result:
-                        total = len(result)
-                        result = result[:200]
-            else:
-                ok, result = api.search_file(port, query, extensions=MODEL_EXTENSIONS)
-                if ok and result:
-                    total = len(result)
-                    result = result[:200]
-
-            def _apply():
-                props.is_searching = False
-                if not ok:
-                    props.status_message = f"Search error: {result}"
-                    return None
-                props.search_results.clear()
-                for path in result:
-                    item = props.search_results.add()
-                    item.name = path
-                props.total_results = total
-                props.last_query_text = query
-                cache.save_search_cache(query, list(result), total)
-                count = len(result)
-                if total > count:
-                    props.status_message = f"Showing {count} of {total} results — refine your search"
-                elif count:
-                    props.status_message = f"Found {count} result(s)"
-                elif use_cache and not cache.load(cache.get_cache_path()):
-                    props.status_message = "No results — build the cache first"
-                else:
-                    props.status_message = "No results found"
-                return None
-
-            bpy.app.timers.register(_apply, first_interval=0.0)
-
-        threading.Thread(target=_thread, daemon=True).start()
+        props.status_message = f"Found {len(dlcs)} DLC(s)"
         return {"FINISHED"}
 
 
-class AS_OT_import(Operator):
-    bl_idname = "as.import_asset"
-    bl_label = "Import"
+class AS_OT_import_dlc(Operator):
+    bl_idname = "as.import_dlc"
+    bl_label = "Import DLC"
+    bl_description = (
+        "Import all .ydr and .yft files from the selected DLC, "
+        "including textures, and add them to the Asset Browser"
+    )
 
     index: bpy.props.IntProperty()
 
@@ -431,240 +440,172 @@ class AS_OT_import(Operator):
         props = context.scene.as_props
         prefs = get_prefs(context)
 
-        if self.index >= len(props.search_results):
-            self.report({"ERROR"}, "Invalid result index")
+        if props.is_importing_dlc:
+            self.report({"WARNING"}, "A DLC import is already in progress")
             return {"CANCELLED"}
 
-        asset_path = props.search_results[self.index].name
+        if self.index >= len(props.dlc_list):
+            self.report({"ERROR"}, "Invalid DLC index")
+            return {"CANCELLED"}
+
+        dlc_item = props.dlc_list[self.index]
+        dlc_name = dlc_item.name
         temp_dir = prefs.temp_dir
 
         if not temp_dir or not os.path.isdir(temp_dir):
             self.report({"ERROR"}, "Temp directory is not set or does not exist")
             return {"CANCELLED"}
 
-        props.status_message = f"Downloading {os.path.basename(asset_path)}…"
-        props.is_importing = True
-
-        port = prefs.cw_api_port
-        use_cache = prefs.use_cache
-        drawable_only = props.drawable_only
-        asset_browser = props.send_to_asset_browser and drawable_only
-        clean = props.clean_temp
-
-        def _thread():
-            # Skip download if XML already in temp from a previous import
-            xml_path = os.path.join(temp_dir, os.path.basename(asset_path) + ".xml")
-            if os.path.exists(xml_path):
-                print(f"[AssetASAP] XML in temp — skipping download")
-                def _skip():
-                    props.status_message = "Importing (from temp)…"
-                    return _do_import(
-                        asset_path, None, temp_dir, props,
-                        drawable_only, asset_browser, clean,
-                    )
-                bpy.app.timers.register(_skip, first_interval=0.0)
-                return
-
-            if use_cache:
-                # YTD lookup is instant from cache — batch both in one download call
-                ytd_path = _find_ytd_path(asset_path, port, use_cache)
-                paths = [asset_path] + ([ytd_path] if ytd_path else [])
-                ok, err = api.download_file(port, paths, temp_dir)
-            else:
-                # No cache: model download + YTD search run in parallel
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fut_model = ex.submit(api.download_file, port, [asset_path], temp_dir)
-                    fut_ytd   = ex.submit(_find_ytd_path, asset_path, port, use_cache)
-                ok, err = fut_model.result()
-                ytd_path = fut_ytd.result()
-                if ok and ytd_path:
-                    ok2, err2 = api.download_file(port, [ytd_path], temp_dir)
-                    if not ok2:
-                        print(f"[AssetASAP] YTD download failed (non-fatal): {err2}")
-
-            def _after():
-                if not ok:
-                    props.status_message = f"Download error: {err}"
-                    props.is_importing = False
-                    return None
-                props.status_message = "Importing…"
-                return _do_import(
-                    asset_path, ytd_path, temp_dir, props,
-                    drawable_only, asset_browser, clean,
-                )
-
-            bpy.app.timers.register(_after, first_interval=0.0)
-
-        threading.Thread(target=_thread, daemon=True).start()
-        return {"FINISHED"}
-
-
-class AS_OT_import_by_name(Operator):
-    bl_idname = "as.import_by_name"
-    bl_label = "Import Asset by Name"
-
-    asset_name: bpy.props.StringProperty()
-
-    def execute(self, context):
-        # Fallback to current scene if context is empty (common in timers)
-        scene = context.scene if context and context.scene else bpy.context.scene
-        props = scene.as_props
-        prefs = get_prefs()
-        asset_name = self.asset_name
-
-        if not asset_name:
-            print("[AssetASAP] Error: No asset name provided to operator")
+        if not bpy.data.filepath:
+            self.report({"ERROR"}, "Save the .blend file first to use Asset Browser")
             return {"CANCELLED"}
 
-        print(f"[AssetASAP] Starting import workflow for: {asset_name}")
-        props.search_query = asset_name
+        cache_data = cache.load(cache.get_cache_path())
+        if not cache_data:
+            self.report({"ERROR"}, "Cache not found — build it first")
+            return {"CANCELLED"}
+
+        # Determine which extensions to import based on user filter
+        filt = props.import_filter
+        if filt == "YDR":
+            ext_filter = (".ydr",)
+        elif filt == "YFT":
+            ext_filter = (".yft",)
+        else:
+            ext_filter = (".ydr", ".yft")
+
+        asset_files = cache.get_dlc_files(
+            cache_data, dlc_name, extensions=ext_filter
+        )
+
+        if not asset_files:
+            self.report({"WARNING"}, f"No files found in '{dlc_name}' for filter '{filt}'")
+            return {"CANCELLED"}
+
+        # Apply category filter (Vehicles / Peds / Props / All)
+        category = props.asset_category
+        if category == "VEHICLES":
+            asset_files = [f for f in asset_files if _is_vehicle_path(f)]
+        elif category == "PEDS":
+            asset_files = [f for f in asset_files if _is_ped_path(f)]
+        elif category == "PROPS":
+            asset_files = [f for f in asset_files if not _is_vehicle_path(f) and not _is_ped_path(f)]
+
+        if not asset_files:
+            self.report({"WARNING"}, f"No {category.lower()} found in '{dlc_name}'")
+            return {"CANCELLED"}
+
+        # Auto-sync config so CodeWalker.API saves XMLs to the addon's temp_dir
         port = prefs.cw_api_port
-        temp_dir = prefs.temp_dir
+        ok_sync, sync_msg = api.set_config(
+            port=port,
+            gta_path=prefs.gta_path,
+            output_dir=temp_dir,
+            enable_mods=prefs.enable_mods,
+            dlc=prefs.dlc,
+        )
+        if not ok_sync:
+            self.report({"ERROR"}, f"Config sync failed: {sync_msg}")
+            return {"CANCELLED"}
+
+        props.is_importing_dlc = True
+        props.dlc_import_progress = f"Preparing {dlc_name} (0/{len(asset_files)})…"
+        props.status_message = f"Importing DLC: {dlc_name}…"
+
         use_cache = prefs.use_cache
-        drawable_only = props.drawable_only
-        asset_browser = props.send_to_asset_browser and drawable_only
         clean = props.clean_temp
+        total = len(asset_files)
 
         def _thread():
-            print(f"[AssetASAP] [Thread] Searching for '{asset_name}' (Cache: {use_cache})...")
-            if use_cache:
-                cache_data = cache.load(cache.get_cache_path())
-                if cache_data:
-                    result, _ = cache.search_local(
-                        cache_data, asset_name, extensions=MODEL_EXTENSIONS
-                    )
-                    ok = True
-                else:
-                    print("[AssetASAP] [Thread] Cache requested but not found, falling back to API.")
-                    ok, result = api.search_file(
-                        port, asset_name, extensions=MODEL_EXTENSIONS
-                    )
-            else:
-                ok, result = api.search_file(
-                    port, asset_name, extensions=MODEL_EXTENSIONS
-                )
+            successes = 0
+            failures = 0
 
-            if not ok or not result:
-                print(f"[AssetASAP] [Thread] NOT FOUND: '{asset_name}' (Result: {result})")
-                def _err():
-                    bpy.context.scene.as_props.status_message = f"Not found: {asset_name}"
-                    return None
-                bpy.app.timers.register(_err, first_interval=0.0)
-                return
+            for i, asset_path in enumerate(asset_files):
+                basename = os.path.basename(asset_path)
 
-            # Prefer .ydr or .yft
-            best = next(
-                (p for p in result if p.lower().endswith((".ydr", ".yft"))),
-                result[0],
-            )
-            print(f"[AssetASAP] [Thread] Best match: {best}")
-
-            # Skip download if XML already in temp from a previous import
-            xml_path = os.path.join(temp_dir, os.path.basename(best) + ".xml")
-            if os.path.exists(xml_path):
-                print(f"[AssetASAP] [Thread] XML in temp — skipping download")
-                def _skip():
+                # Update progress on main thread
+                def _progress(idx=i, name=basename):
                     p = bpy.context.scene.as_props
-                    p.search_results.clear()
-                    for path in result:
-                        item = p.search_results.add()
-                        item.name = path
-                    p.status_message = "Importing (from temp)…"
-                    p.is_importing = True
-                    return _do_import(best, None, temp_dir, p, drawable_only, asset_browser, clean)
-                bpy.app.timers.register(_skip, first_interval=0.0)
-                return
+                    p.dlc_import_progress = f"Downloading {name} ({idx + 1}/{total})…"
+                    return None
+                bpy.app.timers.register(_progress, first_interval=0.0)
 
-            def _populate():
+                # Skip if already imported as asset
+                asset_name_check = os.path.splitext(basename)[0]
+                # We can't check _is_already_asset from thread, so skip this check
+
+                # Download model + YTD
+                try:
+                    xml_path = os.path.join(temp_dir, basename + ".xml")
+                    if not os.path.exists(xml_path):
+                        # Find YTD
+                        ytd_path = _find_ytd_path(asset_path, port, use_cache)
+                        paths = [asset_path] + ([ytd_path] if ytd_path else [])
+                        ok, err = api.download_file(port, paths, temp_dir)
+                        if not ok:
+                            print(f"[AssetASAP] Download failed for {basename}: {err}")
+                            failures += 1
+                            continue
+                    else:
+                        ytd_path = None
+                        print(f"[AssetASAP] XML in temp — skipping download for {basename}")
+
+                except Exception as e:
+                    print(f"[AssetASAP] Error downloading {basename}: {e}")
+                    failures += 1
+                    continue
+
+                # Import on main thread and wait for it to complete
+                import_done = threading.Event()
+                import_result = [False, "", None]  # success, name, warning
+
+                def _import(_ap=asset_path, _yp=ytd_path):
+                    try:
+                        merge = _is_vehicle_path(_ap) or _is_ped_path(_ap)
+                        s, n, w = _do_import_single(_ap, _yp, temp_dir, clean, is_vehicle=merge)
+                        import_result[0] = s
+                        import_result[1] = n
+                        import_result[2] = w
+                    except Exception as e:
+                        print(f"[AssetASAP] Import error: {e}")
+                        import_result[0] = False
+                    finally:
+                        import_done.set()
+                    return None
+
+                bpy.app.timers.register(_import, first_interval=0.0)
+                import_done.wait(timeout=120)  # 2 min max per asset
+
+                if import_result[0]:
+                    successes += 1
+                else:
+                    failures += 1
+                    print(f"[AssetASAP] Failed to import {basename}: {import_result[2]}")
+
+            # All done — save the blend file once and update UI
+            def _finish():
                 p = bpy.context.scene.as_props
-                p.search_results.clear()
-                for path in result:
-                    item = p.search_results.add()
-                    item.name = path
-                p.status_message = f"Downloading {os.path.basename(best)}…"
-                p.is_importing = True
+                p.is_importing_dlc = False
+                p.dlc_import_progress = ""
+
+                # Save the .blend file once after all imports
+                if bpy.data.filepath:
+                    _ensure_catalog(bpy.data.filepath)
+                    bpy.ops.wm.save_mainfile()
+
+                msg = f"DLC '{dlc_name}': {successes} imported"
+                if failures:
+                    msg += f", {failures} failed"
+                p.status_message = msg
                 return None
 
-            bpy.app.timers.register(_populate, first_interval=0.0)
-
-            if use_cache:
-                ytd_path = _find_ytd_path(best, port, use_cache)
-                paths = [best] + ([ytd_path] if ytd_path else [])
-                print(f"[AssetASAP] [Thread] Downloading paths: {paths}")
-                ok2, err = api.download_file(port, paths, temp_dir)
-            else:
-                print(f"[AssetASAP] [Thread] Parallel: downloading model + searching YTD")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fut_model = ex.submit(api.download_file, port, [best], temp_dir)
-                    fut_ytd   = ex.submit(_find_ytd_path, best, port, use_cache)
-                ok2, err = fut_model.result()
-                ytd_path = fut_ytd.result()
-                if ok2 and ytd_path:
-                    print(f"[AssetASAP] [Thread] Downloading YTD: {ytd_path}")
-                    ok3, err3 = api.download_file(port, [ytd_path], temp_dir)
-                    if not ok3:
-                        print(f"[AssetASAP] [Thread] YTD download failed (non-fatal): {err3}")
-
-            def _after():
-                p = bpy.context.scene.as_props
-                if not ok2:
-                    print(f"[AssetASAP] [Thread] Download error: {err}")
-                    p.status_message = f"Download error: {err}"
-                    p.is_importing = False
-                    return None
-                print(f"[AssetASAP] [Thread] Download successful, calling _do_import...")
-                return _do_import(
-                    best, ytd_path, temp_dir, p,
-                    drawable_only, asset_browser, clean,
-                )
-
-            bpy.app.timers.register(_after, first_interval=0.0)
+            bpy.app.timers.register(_finish, first_interval=0.0)
 
         threading.Thread(target=_thread, daemon=True).start()
         return {"FINISHED"}
 
 
-class AS_OT_export_textures(Operator):
-    bl_idname = "as.export_textures"
-    bl_label = "Export Textures"
-    bl_description = (
-        "Copy the .dds textures that CodeWalker already extracted to the temp folder "
-        "into the chosen destination folder"
-    )
 
-    def execute(self, context):
-        props = context.scene.as_props
-        prefs = get_prefs(context)
-        obj = context.active_object
-
-        if not obj:
-            self.report({"WARNING"}, "No active object selected")
-            return {"CANCELLED"}
-
-        temp_dir = bpy.path.abspath(prefs.temp_dir)
-        if not temp_dir or not os.path.isdir(temp_dir):
-            self.report({"ERROR"}, "Temp directory is not set or does not exist")
-            return {"CANCELLED"}
-
-        out_dir = bpy.path.abspath(props.texture_export_dir)
-        if not out_dir or not os.path.isdir(out_dir):
-            self.report({"ERROR"}, "Select a valid destination folder first")
-            return {"CANCELLED"}
-
-        copied, failed = copy_textures_from_temp(obj, temp_dir, out_dir)
-
-        for dst in copied:
-            self.report({"INFO"}, f"Copied: {os.path.basename(dst)}")
-
-        for name, reason in failed:
-            self.report({"WARNING"}, f"Skipped '{name}': {reason}")
-
-        if copied:
-            props.status_message = f"Copied {len(copied)} texture(s) to {out_dir}"
-        else:
-            props.status_message = "No textures copied — check temp folder"
-
-        return {"FINISHED"}
 
 
 class AS_OT_clean_orphans(Operator):
@@ -703,10 +644,8 @@ class AS_OT_clean_orphans(Operator):
 classes = [
     AS_OT_sync_config,
     AS_OT_build_cache,
-    AS_OT_search,
-    AS_OT_import,
-    AS_OT_import_by_name,
-    AS_OT_export_textures,
+    AS_OT_load_dlcs,
+    AS_OT_import_dlc,
     AS_OT_clean_orphans,
 ]
 
