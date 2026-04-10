@@ -202,6 +202,10 @@ def _apply_drawable_only(new_objects, asset_path):
             drawable_models.append(obj)
         elif stype in _SOLLUM_BOUND_TYPES or nl.endswith(".col") or nl.startswith("bound"):
             to_delete.append(obj)
+        elif stype == "sollumz_light" or obj.type == "LIGHT":
+            to_delete.append(obj)
+        elif obj.type == "EMPTY" and "light" in nl:
+            to_delete.append(obj)
 
     # Smart LOD Filter: Keep ONLY the highest LOD per base part
     def _get_lod_score(obj):
