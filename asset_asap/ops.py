@@ -222,7 +222,10 @@ def _apply_drawable_only(new_objects, asset_path):
         return 3
 
     def _get_base_name(name):
+        import re
         n = name.lower()
+        # Strip blender suffix (e.g. .001, .002) so duplicates group properly
+        n = re.sub(r'\.\d{3}$', '', n)
         for s in ("_l0", "_l1", "_l2", "_l3", "_l4", "_vh", "_hi", "_high", "_med", "_low", "_vlow"):
             if n.endswith(s): return n[:-len(s)]
         return n
@@ -384,17 +387,24 @@ def _do_import_single(asset_path, ytd_path, temp_dir, clean, catalog_name, is_ve
             if final_obj.data:
                 final_obj.data.name = asset_name_base
 
+    # Auto-link missing textures (non-embedded ones like vehshare)
+    try:
+        bpy.ops.file.find_missing_files('EXEC_DEFAULT', directory=temp_dir, find_all=True)
+    except Exception as e:
+        print(f"[AssetASAP] find_missing_files error: {e}")
+
     # Mark as asset for Asset Browser
     if final_obj:
         ok, warn = _mark_as_asset(final_obj, catalog_name)
         if not ok and warn:
             print(f"[AssetASAP]   Asset warning: {warn}")
 
-    # Auto-link missing textures (non-embedded ones like vehshare)
+    # Pack all external files into the .blend file
     try:
-        bpy.ops.file.find_missing_files('EXEC_DEFAULT', directory=temp_dir, find_all=True)
+        bpy.ops.file.pack_all()
+        print(f"[AssetASAP] Packed external resources into .blend")
     except Exception as e:
-        print(f"[AssetASAP] find_missing_files error: {e}")
+        print(f"[AssetASAP] Failed to pack resources: {e}")
 
     if clean:
         ytd_basename = os.path.basename(ytd_path) if ytd_path else None
@@ -562,14 +572,24 @@ class AS_OT_import_dlc(Operator):
 
         # Apply category filter (Vehicles / Peds / Props / All)
         category = props.asset_category
-        if category == "VEHICLES":
-            # Skip _hi.yft from main iteration so we don't import duplicates.
-            # CodeWalker will download it alongside the base .yft instead.
-            asset_files = [f for f in asset_files if _is_vehicle_path(f) and not f.lower().endswith("_hi.yft")]
-        elif category == "PEDS":
-            asset_files = [f for f in asset_files if _is_ped_path(f)]
-        elif category == "PROPS":
-            asset_files = [f for f in asset_files if not _is_vehicle_path(f) and not _is_ped_path(f)]
+        
+        filtered_files = []
+        for f in asset_files:
+            # Regardless of category, if it's a vehicle path and it's a _hi.yft, skip it 
+            # to avoid duplicate imports (we download it alongside the base .yft anyway).
+            if _is_vehicle_path(f) and f.lower().endswith("_hi.yft"):
+                continue
+                
+            if category == "VEHICLES" and not _is_vehicle_path(f):
+                continue
+            if category == "PEDS" and not _is_ped_path(f):
+                continue
+            if category == "PROPS" and (_is_vehicle_path(f) or _is_ped_path(f)):
+                continue
+                
+            filtered_files.append(f)
+            
+        asset_files = filtered_files
 
         if not asset_files:
             self.report({"WARNING"}, f"No {category.lower()} found in '{dlc_name}'")

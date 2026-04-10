@@ -150,6 +150,9 @@ def list_dlcs(cache_data, extensions=None):
         if fl.endswith(".ydr"):
             groups[dlc_name]["ydr"] += 1
         elif fl.endswith(".yft"):
+            # Hide vehicle _hi.yft files from the count since they are invisibly merged
+            if "/vehicles/" in fl.replace("\\", "/") and fl.endswith("_hi.yft"):
+                continue
             groups[dlc_name]["yft"] += 1
 
     result = []
