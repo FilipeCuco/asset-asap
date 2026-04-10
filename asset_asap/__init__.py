@@ -18,32 +18,35 @@ def _on_load_post(*_):
     """Restore persistent state (asset cache info + DLC list) after Blender loads a file."""
     import bpy
 
-    scene_props = None
-    try:
-        scene_props = bpy.context.scene.as_props
-    except Exception:
-        return
-
-    # Restore asset cache info label
-    info = cache.cache_info_str(cache.get_cache_path())
-    if info:
-        scene_props.cache_info = info
-
-    # Auto-load DLC list if cache exists
-    cache_data = cache.load(cache.get_cache_path())
-    if cache_data:
+    def _init():
         try:
-            dlcs = cache.list_dlcs(cache_data, extensions=(".ydr", ".yft"))
-            scene_props.dlc_list.clear()
-            for d in dlcs:
-                item = scene_props.dlc_list.add()
-                item.name = d["name"]
-                item.ydr_count = d["ydr_count"]
-                item.yft_count = d["yft_count"]
-                item.total = d["total"]
-            scene_props.status_message = f"Loaded {len(dlcs)} DLC(s)"
-        except Exception as e:
-            print(f"[AssetASAP] Failed to restore DLC list: {e}")
+            scene_props = bpy.context.scene.as_props
+        except Exception:
+            return None
+
+        # Restore asset cache info label
+        info = cache.cache_info_str(cache.get_cache_path())
+        if info:
+            scene_props.cache_info = info
+
+        # Auto-load DLC list if cache exists
+        cache_data = cache.load(cache.get_cache_path())
+        if cache_data:
+            try:
+                dlcs = cache.list_dlcs(cache_data, extensions=(".ydr", ".yft"))
+                scene_props.dlc_list.clear()
+                for d in dlcs:
+                    item = scene_props.dlc_list.add()
+                    item.name = d["name"]
+                    item.ydr_count = d["ydr_count"]
+                    item.yft_count = d["yft_count"]
+                    item.total = d["total"]
+                scene_props.status_message = f"Loaded {len(dlcs)} DLC(s)"
+            except Exception as e:
+                print(f"[AssetASAP] Failed to restore DLC list: {e}")
+        return None
+
+    bpy.app.timers.register(_init, first_interval=0.1)
 
 
 def register():

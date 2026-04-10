@@ -35,12 +35,15 @@ _SOLLUM_BOUND_TYPES = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# Asset Browser catalog — fixed UUID so it's stable across sessions
+# Asset Browser catalog
 # ---------------------------------------------------------------------------
 
-_CATALOG_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-_CATALOG_NAME = "Asset ASAP"
-_CATS_FILE    = "blender_assets.cats.txt"
+_CATS_FILE = "blender_assets.cats.txt"
+
+def _get_catalog_uuid(catalog_name):
+    import uuid
+    namespace = uuid.UUID('12345678-1234-5678-1234-567812345678')
+    return str(uuid.uuid5(namespace, catalog_name))
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +148,32 @@ def _merge_meshes(objects, final_name):
     return merged
 
 
+def _flatten_textures(temp_dir):
+    """
+    Copy all .dds files from subdirectories (created by CodeWalker API) 
+    into the root of temp_dir so Sollumz can always find them.
+    Using copy instead of move so the original folders remain for user debugging.
+    """
+    import shutil
+    copied = 0
+    for root, dirs, files in os.walk(temp_dir):
+        if root == temp_dir:
+            continue
+        for f in files:
+            if f.lower().endswith(".dds"):
+                src = os.path.join(root, f)
+                dst = os.path.join(temp_dir, f)
+                if not os.path.exists(dst):
+                    try:
+                        shutil.copy2(src, dst)
+                        copied += 1
+                    except Exception as e:
+                        print(f"[AssetASAP] Failed to copy texture {f}: {e}")
+    if copied > 0:
+        print(f"[AssetASAP] Flattened {copied} textures into {temp_dir}")
+
+
+
 def _apply_drawable_only(new_objects, asset_path):
     """
     Keep only the sollumz_drawable_model mesh — the actual visible geometry.
@@ -173,6 +202,49 @@ def _apply_drawable_only(new_objects, asset_path):
             drawable_models.append(obj)
         elif stype in _SOLLUM_BOUND_TYPES or nl.endswith(".col") or nl.startswith("bound"):
             to_delete.append(obj)
+
+    # Smart LOD Filter: Keep ONLY the highest LOD per base part
+    def _get_lod_score(obj):
+        sz_props = getattr(obj.data, "drawable_model_properties", None)
+        if not sz_props: sz_props = getattr(obj, "drawable_model_properties", None)
+        lod = getattr(sz_props, "sollum_lod", "") if sz_props else ""
+        if lod == "sollumz_veryhigh": return 4
+        if lod == "sollumz_high": return 3
+        if lod == "sollumz_medium": return 2
+        if lod == "sollumz_low": return 1
+        if lod == "sollumz_verylow": return 0
+        nl = obj.name.lower()
+        if "_vh" in nl or "_veryhigh" in nl: return 4
+        if "_hi" in nl or "high" in nl or "_l0" in nl: return 3
+        if "_med" in nl or "_l1" in nl: return 2
+        if "_low" in nl or "_l2" in nl: return 1
+        if "_vlow" in nl or "_l3" in nl or "_l4" in nl: return 0
+        return 3
+
+    def _get_base_name(name):
+        n = name.lower()
+        for s in ("_l0", "_l1", "_l2", "_l3", "_l4", "_vh", "_hi", "_high", "_med", "_low", "_vlow"):
+            if n.endswith(s): return n[:-len(s)]
+        return n
+
+    # Group drawable models by base name
+    grouped = {}
+    for obj in drawable_models:
+        bname = _get_base_name(obj.name)
+        if bname not in grouped:
+            grouped[bname] = []
+        grouped[bname].append(obj)
+
+    final_drawables = []
+    for bname, group in grouped.items():
+        # Sort by score descending
+        group.sort(key=lambda o: _get_lod_score(o), reverse=True)
+        # Keep the best, delete the rest
+        final_drawables.append(group[0])
+        for lower_lod_obj in group[1:]:
+            to_delete.append(lower_lod_obj)
+
+    drawable_models = final_drawables
 
     print(f"[AssetASAP]   models={[o.name for o in drawable_models]}  "
           f"fragment='{fragment_name}'  to_delete={[o.name for o in to_delete]}")
@@ -213,18 +285,18 @@ def _apply_drawable_only(new_objects, asset_path):
     return primary
 
 
-def _ensure_catalog(blend_filepath):
+def _ensure_catalog(blend_filepath, catalog_name):
     """
-    Write/update blender_assets.cats.txt next to the .blend file
-    to ensure the 'Asset ASAP' catalog entry exists.
+    Write/update blender_assets.cats.txt next to the .blend file.
     """
     cats_path = os.path.join(os.path.dirname(blend_filepath), _CATS_FILE)
-    entry     = f"{_CATALOG_UUID}:{_CATALOG_NAME}:{_CATALOG_NAME}\n"
+    cat_uuid  = _get_catalog_uuid(catalog_name)
+    entry     = f"{cat_uuid}:{catalog_name}:{catalog_name}\n"
 
     if os.path.isfile(cats_path):
         with open(cats_path, "r", encoding="utf-8") as f:
             content = f.read()
-        if _CATALOG_UUID in content:
+        if cat_uuid in content:
             return
         with open(cats_path, "a", encoding="utf-8") as f:
             f.write(entry)
@@ -242,9 +314,9 @@ def _is_already_asset(asset_name):
     return obj is not None and obj.asset_data is not None
 
 
-def _mark_as_asset(obj):
+def _mark_as_asset(obj, catalog_name):
     """
-    Mark obj as a Blender asset under the 'Asset ASAP' catalog and
+    Mark obj as a Blender asset under the specified catalog and
     auto-save the .blend file. Skips silently if already catalogued.
     Returns (success: bool, warning: str | None).
     """
@@ -252,18 +324,18 @@ def _mark_as_asset(obj):
         return True, None
 
     obj.asset_mark()
-    obj.asset_data.catalog_id = _CATALOG_UUID
+    obj.asset_data.catalog_id = _get_catalog_uuid(catalog_name)
     obj.asset_generate_preview()
 
     if bpy.data.filepath:
-        _ensure_catalog(bpy.data.filepath)
+        _ensure_catalog(bpy.data.filepath, catalog_name)
         # Don't save on every single asset during batch — caller handles it
         return True, None
     else:
         return False, "Save the .blend file to persist the asset in the browser"
 
 
-def _do_import_single(asset_path, ytd_path, temp_dir, clean, is_vehicle=False):
+def _do_import_single(asset_path, ytd_path, temp_dir, clean, catalog_name, is_vehicle=False):
     """
     Import a single asset_path via Sollumz with drawable_only + asset_browser.
     If is_vehicle=True, merges all drawable meshes into a single object.
@@ -314,9 +386,15 @@ def _do_import_single(asset_path, ytd_path, temp_dir, clean, is_vehicle=False):
 
     # Mark as asset for Asset Browser
     if final_obj:
-        ok, warn = _mark_as_asset(final_obj)
+        ok, warn = _mark_as_asset(final_obj, catalog_name)
         if not ok and warn:
             print(f"[AssetASAP]   Asset warning: {warn}")
+
+    # Auto-link missing textures (non-embedded ones like vehshare)
+    try:
+        bpy.ops.file.find_missing_files('EXEC_DEFAULT', directory=temp_dir, find_all=True)
+    except Exception as e:
+        print(f"[AssetASAP] find_missing_files error: {e}")
 
     if clean:
         ytd_basename = os.path.basename(ytd_path) if ytd_path else None
@@ -485,7 +563,9 @@ class AS_OT_import_dlc(Operator):
         # Apply category filter (Vehicles / Peds / Props / All)
         category = props.asset_category
         if category == "VEHICLES":
-            asset_files = [f for f in asset_files if _is_vehicle_path(f)]
+            # Skip _hi.yft from main iteration so we don't import duplicates.
+            # CodeWalker will download it alongside the base .yft instead.
+            asset_files = [f for f in asset_files if _is_vehicle_path(f) and not f.lower().endswith("_hi.yft")]
         elif category == "PEDS":
             asset_files = [f for f in asset_files if _is_ped_path(f)]
         elif category == "PROPS":
@@ -519,6 +599,38 @@ class AS_OT_import_dlc(Operator):
         def _thread():
             successes = 0
             failures = 0
+            failed_msgs = []
+
+            # --- Pre-download ALL textures into temp_dir ---
+            def _prep_msg(msg):
+                def _m(): bpy.context.scene.as_props.dlc_import_progress = msg
+                bpy.app.timers.register(_m, first_interval=0.0)
+
+            _prep_msg("Gathering DLC textures…")
+            dlc_ytds = cache.get_dlc_files(cache_data, dlc_name, extensions=(".ytd",))
+            
+            # Add global shared dictionaries for vehicles/peds
+            shared_dicts = []
+            if category in ("VEHICLES", "ALL"):
+                shared_dicts.extend(["vehshare.ytd", "vehshare_truck.ytd"])
+            if category in ("PEDS", "ALL"):
+                shared_dicts.extend(["pedshare.ytd"])
+
+            for s_dict in shared_dicts:
+                res, _ = cache.search_local(cache_data, s_dict, limit=1)
+                if res and res[0] not in dlc_ytds:
+                    dlc_ytds.append(res[0])
+            
+            if dlc_ytds:
+                _prep_msg(f"Downloading {len(dlc_ytds)} texture dictionaries…")
+                # Group into chunks of 10 to avoid URI too long errors
+                chunk_size = 10
+                for i in range(0, len(dlc_ytds), chunk_size):
+                    chunk = dlc_ytds[i:i + chunk_size]
+                    api.download_file(port, chunk, temp_dir)
+                
+                _prep_msg("Extracting textures…")
+                _flatten_textures(temp_dir)
 
             for i, asset_path in enumerate(asset_files):
                 basename = os.path.basename(asset_path)
@@ -538,14 +650,27 @@ class AS_OT_import_dlc(Operator):
                 try:
                     xml_path = os.path.join(temp_dir, basename + ".xml")
                     if not os.path.exists(xml_path):
-                        # Find YTD
                         ytd_path = _find_ytd_path(asset_path, port, use_cache)
-                        paths = [asset_path] + ([ytd_path] if ytd_path else [])
+                        
+                        # Support for _hi.yft requirements from Sollumz
+                        hi_path = None
+                        if _is_vehicle_path(asset_path) and not asset_path.lower().endswith("_hi.yft"):
+                            hi_candidate = asset_path[:-4] + "_hi.yft"
+                            res, _ = cache.search_local(cache_data, os.path.basename(hi_candidate), limit=1)
+                            if res: hi_path = res[0]
+
+                        paths = [asset_path]
+                        if ytd_path: paths.append(ytd_path)
+                        if hi_path: paths.append(hi_path)
+
                         ok, err = api.download_file(port, paths, temp_dir)
                         if not ok:
                             print(f"[AssetASAP] Download failed for {basename}: {err}")
                             failures += 1
+                            failed_msgs.append(f"{basename} DL fail: {err}")
                             continue
+                        # If download worked, textures might be in subfolders. Flatten them.
+                        _flatten_textures(temp_dir)
                     else:
                         ytd_path = None
                         print(f"[AssetASAP] XML in temp — skipping download for {basename}")
@@ -553,6 +678,7 @@ class AS_OT_import_dlc(Operator):
                 except Exception as e:
                     print(f"[AssetASAP] Error downloading {basename}: {e}")
                     failures += 1
+                    failed_msgs.append(f"{basename}: {e}")
                     continue
 
                 # Import on main thread and wait for it to complete
@@ -562,13 +688,14 @@ class AS_OT_import_dlc(Operator):
                 def _import(_ap=asset_path, _yp=ytd_path):
                     try:
                         merge = _is_vehicle_path(_ap) or _is_ped_path(_ap)
-                        s, n, w = _do_import_single(_ap, _yp, temp_dir, clean, is_vehicle=merge)
+                        s, n, w = _do_import_single(_ap, _yp, temp_dir, clean, dlc_name, is_vehicle=merge)
                         import_result[0] = s
                         import_result[1] = n
                         import_result[2] = w
                     except Exception as e:
                         print(f"[AssetASAP] Import error: {e}")
                         import_result[0] = False
+                        import_result[2] = str(e)
                     finally:
                         import_done.set()
                     return None
@@ -580,7 +707,9 @@ class AS_OT_import_dlc(Operator):
                     successes += 1
                 else:
                     failures += 1
-                    print(f"[AssetASAP] Failed to import {basename}: {import_result[2]}")
+                    err_txt = import_result[2] or "Unknown"
+                    failed_msgs.append(f"{basename}: {err_txt}")
+                    print(f"[AssetASAP] Failed to import {basename}: {err_txt}")
 
             # All done — save the blend file once and update UI
             def _finish():
@@ -590,12 +719,13 @@ class AS_OT_import_dlc(Operator):
 
                 # Save the .blend file once after all imports
                 if bpy.data.filepath:
-                    _ensure_catalog(bpy.data.filepath)
+                    _ensure_catalog(bpy.data.filepath, dlc_name)
                     bpy.ops.wm.save_mainfile()
 
                 msg = f"DLC '{dlc_name}': {successes} imported"
                 if failures:
-                    msg += f", {failures} failed"
+                    msg += f". Errors: {failed_msgs[0]}"
+                    print("[AssetASAP] ALL FAILURES:", failed_msgs)
                 p.status_message = msg
                 return None
 
