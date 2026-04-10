@@ -19,7 +19,26 @@ Import GTA V assets directly into Blender from RPF archives via [CodeWalker API]
 
 ### 1. CodeWalker API
 
-Download and run **CodeWalker API** from [gta5-mods.com](https://www.gta5-mods.com/tools/codewalker-api). This tool exposes a local REST API that reads GTA V's RPF archives and extracts assets on demand.
+Download and run **CodeWalker API** from [codewalker-api](https://www.gta5-mods.com/tools/codewalker-api). This tool exposes a local REST API that reads GTA V's RPF archives and extracts assets on demand.
+
+(MAKE SURE TO SETUP CODEWALKER API CONFIG FILE LIKE MINE "\CodeWalker.API\Config\userconfig.json"
+
+Make sure to create cw_out and point GTAPath to your GTA folder
+note that GTA_FILES isnt really the gta folder, is only a name that i used, but its a regular folder
+
+```json
+{
+  "CodewalkerOutputDir": "C:\\GTA_FILES\\cw_out",
+  "BlenderOutputDir": "",
+  "FivemOutputDir": "",
+  "RpfArchivePath": "",
+  "GTAPath": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Grand Theft Auto V",
+  "Gen9": false,
+  "Dlc": "",
+  "EnableMods": false,
+  "Port": 0
+}
+```
 
 Keep it running in the background while using Asset ASAP.
 
