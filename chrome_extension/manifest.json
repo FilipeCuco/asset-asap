@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Asset ASAP - Send to Blender",
+  "version": "1.0",
+  "description": "Send GTA V assets from PlebMasters Forge directly to Blender.",
+  "permissions": [
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://forge.plebmasters.de/*",
+    "http://localhost:7890/*",
+    "http://127.0.0.1:7890/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://forge.plebmasters.de/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}

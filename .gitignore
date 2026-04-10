@@ -1,0 +1,17 @@
+# Blender
+__pycache__/
+*.pyc
+*.pyo
+*.blend1
+
+# Backup folders
+.bkp/
+
+# CodeWalker API binary (download separately from gta5-mods.com)
+CodeWalker.API/
+
+# User-specific config with local paths
+asset_asap/Config/userconfig.json
+
+# Release zips
+*.zip
